@@ -2,47 +2,35 @@ syntax = "proto3";
 
 package paxos;
 
-service Proposer {
-    rpc Prepare(PrepareRequest) returns (PrepareResponse) {}
-    rpc Accept(AcceptRequest) returns (AcceptResponse) {}
-}
 
 service Acceptor {
-    rpc ReceivePrepare(PrepareRequest) returns (PrepareResponse) {}
-    rpc SendPromise(PrepareRequest) returns (PrepareResponse) {}
-    rpc SendAccept(AcceptRequest) returns (AcceptResponse) {}
+    rpc ReceivePrepare(PrepareRequest) returns (PrepareResponse);
+    rpc SendAccept(AcceptRequest) returns (AcceptResponse);
 }
 
-service Leader {
-    rpc Propose(ProposeRequest) returns (ProposeResponse) {}
-}
-
-service LeaderElection {
-    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
-    rpc Election(ElectionMessage) returns (ElectionResponse) {}
-    rpc Coordinator(ElectionMessage) returns (ElectionResponse) {}
+service Proposer {
+    rpc Prepare(PrepareRequest) returns (PrepareResponse);
+    rpc Accept(AcceptRequest) returns (AcceptResponse);
 }
 
 message PrepareRequest {
-    int32 round = 1;
-    string proposal_id = 2;
+    int64 proposal_number = 1;
 }
 
 message PrepareResponse {
-    int32 round = 1;
-    string proposal_id = 2;
-    string value = 3;
+    bool promise = 1; 
+    int64 proposal_number = 2;
+    string accepted_value = 3; 
+    int64 accepted_proposal_number = 4; 
 }
 
 message AcceptRequest {
-    int32 round = 1;
-    string proposal_id = 2;
-    string value = 3;
+    int64 proposal_number = 1;
+    string value = 2;  
 }
 
 message AcceptResponse {
-    int32 round = 1;
-    string proposal_id = 2;
+    bool accepted = 1; 
 }
 
 message ProposeRequest {
