@@ -1,83 +1,89 @@
-#include <iostream>
-#include <memory>
-#include <string>
-#include <thread>
 #include <grpcpp/grpcpp.h>
 #include "paxos.grpc.pb.h"
+#include <iostream>
+#include <unordered_map>
+#include <vector>
+#include <memory>
+#include <map>
 
+using grpc::Channel;
+using grpc::ClientContext;
+using grpc::Status;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
-using grpc::Status;
-using paxos::Proposer;
-using paxos::Acceptor;
-using paxos::Leader;
-using paxos::LeaderElection;
-using paxos::PrepareRequest;
-using paxos::PrepareResponse;
-using paxos::AcceptRequest;
-using paxos::AcceptResponse;
-using paxos::ProposeRequest;
-using paxos::ProposeResponse;
-using paxos::RequestVoteRequest;
-using paxos::RequestVoteResponse;
-
-class ProposerImpl final : public Proposer::Service {
-private:
-    int majority_threshold;
-    std::unordered_map<int, std::vector<PrepareResponse>> prepare_responses;
-
-public:
-    ProposerImpl(int num_acceptors) : majority_threshold(num_acceptors / 2 + 1) {}
-
-    Status Prepare(ServerContext* context, const PrepareRequest* request, PrepareResponse* response) override {
-        prepare_responses[request->round()].push_back(*response);
-        if (prepare_responses[request->round()].size() >= majority_threshold) {
-            AcceptRequest accept_request;
-            accept_request.set_round(request->round());
-            accept_request.set_proposal_id(request->proposal_id());
-            accept_request.set_value(prepare_responses[request->round()][0].value()); // Simplified assumption
-
-            AcceptResponse accept_response;
-        }
-        return Status::OK;
-    }
-
-    Status Accept(ServerContext* context, const AcceptRequest* request, AcceptResponse* response) override {
-        // Handle accept request logic here
-        return Status::OK;
-    }
-};
+using namespace paxos;
 
 class AcceptorImpl final : public Acceptor::Service {
 private:
-    int last_promised_round = 0;
-    int last_accepted_round = 0;
-    std::string last_accepted_value;
+    int64 min_proposal_number = 0;
+    int64 accepted_proposal_number = 0;
+    std::string accepted_value;
 
 public:
     Status ReceivePrepare(ServerContext* context, const PrepareRequest* request, PrepareResponse* response) override {
-        if (request->round() > last_promised_round) {
-            last_promised_round = request->round();
-            response->set_round(request->round());
-            response->set_proposal_id(request->proposal_id());
-            if (last_accepted_round > 0) {
-                response->set_value(last_accepted_value);
+        if (request->proposal_number() > min_proposal_number) {
+            min_proposal_number = request->proposal_number();
+            response->set_promise(true);
+            response->set_proposal_number(request->proposal_number());
+            if (accepted_proposal_number > 0) {
+                response->set_accepted_value(accepted_value);
+                response->set_accepted_proposal_number(accepted_proposal_number);
             }
         }
         return Status::OK;
     }
 
-    Status SendPromise(ServerContext* context, const PrepareRequest* request, PrepareResponse* response) override {
-        // This might simply be part of ReceivePrepare
+    Status SendAccept(ServerContext* context, const AcceptRequest* request, AcceptResponse* response) override {
+        if (request->proposal_number() >= min_proposal_number) {
+            accepted_proposal_number = request->proposal_number();
+            accepted_value = request->value();
+            response->set_accepted(true);
+        }
         return Status::OK;
     }
+};
 
-    Status SendAccept(ServerContext* context, const AcceptRequest* request, AcceptResponse* response) override {
-        if (request->round() >= last_promised_round) {
-            last_accepted_round = request->round();
-            last_accepted_value = request->value();
+class ProposerImpl final : public Proposer::Service {
+private:
+    int majority_threshold;
+    std::unordered_map<int64, std::vector<PrepareResponse>> prepare_responses;
+    std::map<int, std::unique_ptr<Acceptor::Stub>> acceptor_stubs;
+
+public:
+    ProposerImpl(int num_acceptors, const std::map<int, std::string>& acceptor_addresses)
+        : majority_threshold(num_acceptors / 2 + 1) {
+        grpc::ChannelArguments args;
+        args.SetMaxReceiveMessageSize(INT_MAX);
+        for (const auto& address : acceptor_addresses) {
+            auto channel = grpc::CreateCustomChannel(address.second, grpc::InsecureChannelCredentials(), args);
+            acceptor_stubs[address.first] = Acceptor::NewStub(channel);
         }
+    }
+
+    Status Prepare(ServerContext* context, const PrepareRequest* request, PrepareResponse* response) override {
+        std::vector<ClientContext> client_contexts(acceptor_stubs.size());
+        std::vector<Status> statuses(acceptor_stubs.size());
+        int i = 0;
+
+        for (auto& stub : acceptor_stubs) {
+            statuses[i] = stub.second->ReceivePrepare(&client_contexts[i], *request, response);
+            if (statuses[i].ok() && response->promise()) {
+                prepare_responses[request->proposal_number()].push_back(*response);
+            }
+            i++;
+        }
+
+        if (prepare_responses[request->proposal_number()].size() >= majority_threshold) {
+            AcceptRequest accept_request;
+            accept_request.set_proposal_number(request->proposal_number());
+            accept_request.set_value("new_value"); 
+            AcceptResponse accept_response;
+            for (auto& stub : acceptor_stubs) {
+                stub.second->SendAccept(&client_contexts[i], accept_request, &accept_response);
+            }
+        }
+
         return Status::OK;
     }
 };
